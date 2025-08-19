@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 
 // =============================
 // Types
@@ -19,21 +19,21 @@ type ImageInfo = {
   dataUrl?: string;
   naturalWidth?: number;
   naturalHeight?: number;
-  displayHeight: number; // fixed 650 in this app
+  displayHeight: number; // fixed 800 in this app
   displayWidth?: number; // computed after layout
 };
 
 type LabelInstance = {
-  id: string;
-  type: string; // danger type
+  id: number; // SAME id as the table row
+  type: string; // danger type (label text)
   x?: number; // relative [0..1]
   y?: number; // relative [0..1]
   note?: string;
 };
 
 type Row = {
-  id: string;
-  labelId?: string;
+  id: number; // SAME id as the label
+  labelId?: number; // duplicate for convenience
   danger: string;
   position?: string; // e.g., "x=0.62,y=0.41"
   scenario?: string;
@@ -64,7 +64,6 @@ type ProjectState = {
 // =============================
 
 const nowIso = () => new Date().toISOString();
-const uid = (p = "id") => `${p}_${Math.random().toString(36).slice(2, 9)}`;
 
 function clamp01(n: number) {
   return Math.min(1, Math.max(0, n));
@@ -95,11 +94,22 @@ function downloadText(filename: string, text: string) {
   URL.revokeObjectURL(url);
 }
 
+// Helper: next incremental numeric ID (used for BOTH rows and labels)
+function getNextRowId(rows: Row[]): number {
+  if (!rows || rows.length === 0) return 1;
+  let maxId = 0;
+  for (const r of rows) {
+    const n = typeof r.id === "number" ? r.id : Number((r as any).id);
+    if (!Number.isNaN(n) && n > maxId) maxId = n;
+  }
+  return maxId + 1;
+}
+
 function toCsv(rows: Row[]) {
   const headers = [
     "ID",
     "Danger",
-    //"Position",
+    "Position",
     "Scénario",
     "S",
     "P",
@@ -109,15 +119,15 @@ function toCsv(rows: Row[]) {
     "Pr",
     "Rr",
     "Commentaires",
-    //"Statut",
-    //"Responsable",
-    //"Échéance",
+    "Statut",
+    "Responsable",
+    "Échéance",
   ];
   const lines = rows.map((r) =>
     [
       r.id,
       r.danger ?? "",
-      //r.position ?? "",
+      r.position ?? "",
       r.scenario ?? "",
       r.S ?? "",
       r.P ?? "",
@@ -127,9 +137,9 @@ function toCsv(rows: Row[]) {
       r.Pr ?? "",
       r.Rr ?? "",
       r.comments ?? "",
-      //r.status ?? "",
-      //r.owner ?? "",
-      //r.dueDate ?? "",
+      r.status ?? "",
+      r.owner ?? "",
+      r.dueDate ?? "",
     ]
       .map((cell) =>
         typeof cell === "string"
@@ -139,6 +149,13 @@ function toCsv(rows: Row[]) {
       .join(",")
   );
   return [headers.join(","), ...lines].join("\n");
+}
+
+// ---- Quick runtime tests (dev only) ----
+if (typeof window !== "undefined") {
+  // getNextRowId
+  console.assert(getNextRowId([]) === 1, "getNextRowId([]) should be 1");
+  console.assert(getNextRowId([{ id: 1 } as Row]) === 2, "getNextRowId([{id:1}]) should be 2");
 }
 
 // Default library of hazards
@@ -169,7 +186,7 @@ const DEFAULT_HAZARDS = [
 export default function App() {
   const [project, setProject] = useState<ProjectState>(() => ({
     schemaVersion: 1,
-    meta: { title: "Evaluation des Risques machine", createdAt: nowIso() },
+    meta: { title: "Projet EN12100", createdAt: nowIso() },
     settings: {
       scoring: {
         mode: "SP",
@@ -178,15 +195,15 @@ export default function App() {
         thresholds: { low: 5, medium: 12, high: 25 },
       },
     },
-    image: { displayHeight: 650 },
+    image: { displayHeight: 800 },
     labels: [],
     rows: [],
   }));
 
   const [library, setLibrary] = useState<string[]>(DEFAULT_HAZARDS);
   const [filter, setFilter] = useState("");
-  const [selectedLabelId, setSelectedLabelId] = useState<string | null>(null);
-  const [selectedRowId, setSelectedRowId] = useState<string | null>(null);
+  const [selectedLabelId, setSelectedLabelId] = useState<number | null>(null);
+  const [selectedRowId, setSelectedRowId] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   const imgRef = useRef<HTMLImageElement | null>(null);
@@ -226,7 +243,7 @@ export default function App() {
       schemaVersion: 1,
       meta: { title: "Projet EN12100", createdAt: nowIso() },
       settings: project.settings,
-      image: { displayHeight: 650 },
+      image: { displayHeight: 800 },
       labels: [],
       rows: [],
     });
@@ -250,15 +267,33 @@ export default function App() {
       try {
         const text = await file.text();
         const data = JSON.parse(text);
-        // basic permissive validation
         if (!data || typeof data !== "object") throw new Error("Fichier invalide");
+        // Normalize: make row.id numeric, label.id numeric, and ensure row.id === label.id
+        let labels: LabelInstance[] = Array.isArray(data.labels)
+          ? data.labels.map((l: any) => ({ id: Number(l.id) || 0, type: l.type, x: l.x, y: l.y, note: l.note }))
+          : [];
+        let rows: Row[] = Array.isArray(data.rows)
+          ? data.rows.map((r: any, i: number) => ({
+              ...r,
+              id: Number(r.id) || i + 1,
+              labelId: Number(r.labelId) || Number(r.id) || i + 1,
+            }))
+          : [];
+        // If both arrays exist, align by index to guarantee equality id === labelId === label.id
+        const n = Math.min(labels.length, rows.length);
+        for (let i = 0; i < n; i++) {
+          const id = rows[i].id || i + 1;
+          labels[i].id = id;
+          rows[i].id = id;
+          rows[i].labelId = id;
+        }
         setProject((prev) => ({
           schemaVersion: 1,
           meta: data.meta ?? prev.meta,
           settings: data.settings ?? prev.settings,
-          image: { displayHeight: 650, ...(data.image || {}) },
-          labels: Array.isArray(data.labels) ? data.labels : [],
-          rows: Array.isArray(data.rows) ? data.rows : [],
+          image: { displayHeight: 800, ...(data.image || {}) },
+          labels,
+          rows,
         }));
         setError(null);
       } catch (e: any) {
@@ -342,32 +377,40 @@ export default function App() {
     e.preventDefault();
   };
 
-  const createRowForLabel = (label: LabelInstance) => {
-    const rowId = uid("R");
+  // Add a label + a row with the SAME incremental id
+  const addLabelAndRow = (danger: string, x?: number, y?: number) => {
+    const id = getNextRowId(project.rows);
     const position =
-      typeof label.x === "number" && typeof label.y === "number"
-        ? `x=${label.x.toFixed(2)},y=${label.y.toFixed(2)}`
+      typeof x === "number" && typeof y === "number"
+        ? `x=${x.toFixed(2)},y=${y.toFixed(2)}`
         : undefined;
-    const newRow: Row = {
-      id: rowId,
-      labelId: label.id,
-      danger: label.type,
-      //position,
-      scenario: "",
-      S: "",
-      P: "",
-      R: undefined,
-      measures: "",
-      Sr: "",
-      Pr: "",
-      Rr: undefined,
-      comments: "",
-      //status: "À évaluer",
-      //owner: "",
-      //dueDate: "",
-    };
-    setProject((p) => ({ ...p, rows: [...p.rows, newRow] }));
-    setSelectedRowId(rowId);
+    setProject((p) => ({
+      ...p,
+      labels: [...p.labels, { id, type: danger, x, y }],
+      rows: [
+        ...p.rows,
+        {
+          id,
+          labelId: id,
+          danger,
+          position,
+          scenario: "",
+          S: "",
+          P: "",
+          R: undefined,
+          measures: "",
+          Sr: "",
+          Pr: "",
+          Rr: undefined,
+          comments: "",
+          status: "À évaluer",
+          owner: "",
+          dueDate: "",
+        },
+      ],
+    }));
+    setSelectedLabelId(id);
+    setSelectedRowId(id);
   };
 
   const handleCanvasDrop = (e: React.DragEvent) => {
@@ -375,18 +418,14 @@ export default function App() {
     const danger = e.dataTransfer.getData("text/plain");
     if (!danger) return;
 
-    const container = canvasRef.current;
     const img = imgRef.current;
-    if (!container || !img) return;
+    if (!img) return;
 
     const rect = img.getBoundingClientRect();
     const x = clamp01((e.clientX - rect.left) / rect.width);
     const y = clamp01((e.clientY - rect.top) / rect.height);
 
-    const label: LabelInstance = { id: uid("L"), type: danger, x, y };
-    setProject((p) => ({ ...p, labels: [...p.labels, label] }));
-    setSelectedLabelId(label.id);
-    createRowForLabel(label);
+    addLabelAndRow(danger, x, y);
   };
 
   // Drop to the side area (outside image) — still creates a row, no coordinates
@@ -395,10 +434,7 @@ export default function App() {
     e.preventDefault();
     const danger = e.dataTransfer.getData("text/plain");
     if (!danger) return;
-    const label: LabelInstance = { id: uid("L"), type: danger };
-    setProject((p) => ({ ...p, labels: [...p.labels, label] }));
-    setSelectedLabelId(label.id);
-    createRowForLabel(label);
+    addLabelAndRow(danger);
   };
 
   // =============================
@@ -407,7 +443,7 @@ export default function App() {
 
   const onStartMoveLabel = (
     e: React.MouseEvent,
-    labelId: string
+    labelId: number
   ) => {
     e.stopPropagation();
     setSelectedLabelId(labelId);
@@ -438,7 +474,7 @@ export default function App() {
     window.addEventListener("mouseup", onUp);
   };
 
-  const deleteLabel = (labelId: string) => {
+  const deleteLabel = (labelId: number) => {
     // Ask whether to remove linked row(s)
     const linked = project.rows.filter((r) => r.labelId === labelId);
     let removeRows = false;
@@ -465,18 +501,17 @@ export default function App() {
     return { ...row, R, Rr };
   }
 
-  const updateRow = (rowId: string, patch: Partial<Row>) => {
+  const updateRow = (rowId: number, patch: Partial<Row>) => {
     setProject((p) => ({
       ...p,
       rows: p.rows.map((r) => (r.id === rowId ? { ...r, ...patch } : r)),
     }));
   };
 
-  const linkJumpToLabel = (labelId?: string) => {
-    if (!labelId) return;
+  const linkJumpToLabel = (labelId?: number) => {
+    if (labelId == null) return;
     setSelectedLabelId(labelId);
-    // focus visually by briefly animating? (simple scroll into view)
-    const el = document.getElementById(labelId);
+    const el = document.getElementById(`L-${labelId}`);
     if (el) el.scrollIntoView({ behavior: "smooth", block: "center" });
   };
 
@@ -493,7 +528,7 @@ export default function App() {
   );
 
   return (
-    <div className="w-full min-h-screen bg-neutral-50 text-neutral-900">      
+    <div className="w-full min-h-screen bg-neutral-50 text-neutral-900">
       {/* Topbar */}
       <div className="sticky top-0 z-40 border-b bg-white/80 backdrop-blur p-2 flex items-center gap-2">
         <input
@@ -589,7 +624,7 @@ export default function App() {
                 title="Glisser sur l'image pour créer un marqueur et une ligne"
               >
                 <span className="w-2 h-2 rounded-full bg-emerald-500" />
-                {haz}
+                <span className="text-sm">{haz}</span>
               </div>
             ))}
           </div>
@@ -606,14 +641,14 @@ export default function App() {
           >
             <div className="mb-2 flex items-center justify-between">
               <div className="font-semibold">Image de la machine</div>
-              <div className="text-sm text-neutral-500">Hauteur fixe 650 px, largeur proportionnelle</div>
+              <div className="text-sm text-neutral-500">Hauteur fixe 800 px, largeur proportionnelle</div>
             </div>
 
             {!project.image.dataUrl ? (
               <div
                 onDrop={onDropImage}
                 onDragOver={(e) => e.preventDefault()}
-                className="h-[650px] border-2 border-dashed rounded-xl flex items-center justify-center text-neutral-500"
+                className="h-[800px] border-2 border-dashed rounded-xl flex items-center justify-center text-neutral-500"
                 aria-label="Zone de dépôt d'image"
               >
                 Glissez-déposez une image (fichier ou depuis le web),
@@ -626,7 +661,7 @@ export default function App() {
                   id="machine-image"
                   src={project.image.dataUrl}
                   alt="Machine"
-                  className="block mx-auto h-[650px] object-contain select-none"
+                  className="block mx-auto h-[800px] object-contain select-none"
                   draggable={false}
                 />
 
@@ -645,7 +680,7 @@ export default function App() {
                   return (
                     <button
                       key={lb.id}
-                      id={lb.id}
+                      id={`L-${lb.id}`}
                       style={style}
                       className={
                         "px-2 py-1 rounded-full shadow border bg-white/90 hover:bg-white outline-none focus:ring " +
@@ -653,10 +688,11 @@ export default function App() {
                       }
                       onMouseDown={(e) => onStartMoveLabel(e, lb.id)}
                       onClick={() => setSelectedLabelId(lb.id)}
-                      title={lb.type}
+                      title={`#${lb.id} — ${lb.type}`}
                     >
                       <span className="inline-flex items-center gap-2 text-sm">
                         <span className="w-2 h-2 rounded-full bg-emerald-600" />
+                        <span className="px-1.5 py-0.5 rounded bg-emerald-100 text-emerald-800 text-xs font-semibold">#{lb.id}</span>
                         {lb.type}
                         <span
                           className="ml-2 text-neutral-400 hover:text-red-600"
@@ -691,7 +727,7 @@ export default function App() {
                     {[
                       "ID",
                       "Danger",
-                      //"Position",
+                      "Position",
                       "Scénario",
                       "S",
                       "P",
@@ -701,10 +737,10 @@ export default function App() {
                       "Pr",
                       "Rr",
                       "Commentaires",
-                      //"Statut",
-                      //"Responsable",
-                      //"Échéance",
-                      //"↔",
+                      "Statut",
+                      "Responsable",
+                      "Échéance",
+                      "↔",
                     ].map((h) => (
                       <th key={h} className="border px-2 py-1 text-left">
                         {h}
@@ -730,13 +766,13 @@ export default function App() {
                             onChange={(e) => updateRow(r.id, { danger: e.target.value })}
                           />
                         </td>
-                        /* <td className="border px-2 py-1 min-w-[140px]">
+                        <td className="border px-2 py-1 min-w-[140px]">
                           <input
                             className="w-full"
                             value={r.position ?? ""}
                             onChange={(e) => updateRow(r.id, { position: e.target.value })}
                           />
-                        </td> */
+                        </td>
                         <td className="border px-2 py-1 min-w-[220px]">
                           <input
                             className="w-full"
@@ -826,7 +862,7 @@ export default function App() {
                             onChange={(e) => updateRow(r.id, { comments: e.target.value })}
                           />
                         </td>
-						<td className="border px-2 py-1 w-36">
+                        <td className="border px-2 py-1 w-36">
                           <select
                             className="w-full"
                             value={r.status ?? "À évaluer"}
